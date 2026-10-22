@@ -1,0 +1,152 @@
+# Agent Resource Badges for herdr
+
+Green, orange and red CPU/RAM badges for every agent in the [herdr](https://herdr.dev)
+sidebar. A badge only appears while an agent is actually busy, so a quiet
+sidebar looks exactly like it did before.
+
+```text
+agents
+◐ Refactor auth middle…
+  15% · api · web-app          green: above 10 % CPU
+○ Write release notes
+  docs · web-app               quiet agent: nothing added
+◐ Fix flaky e2e test s…
+  108% · ci · web-app          red: more than one full core
+○ Index the monorepo f…
+  2.8G · search · core         orange: the process tree holds 2.8 GiB
+```
+
+## Why
+
+With a dozen agents open, the question is usually not *how busy is the machine*
+but *which agent is it*. A single coding-agent session is rarely one process:
+a Claude Code pane on the author's machine typically runs around 11 of them
+(the agent plus its MCP servers) and holds 0.6 to 1.3 GiB. This plugin sums the
+whole process tree below each pane's shell and puts the answer next to the
+agent that owns it.
+
+## What the badge means
+
+| Colour | CPU (100 % = one core) | or RAM of the pane's process tree |
+|---|---|---|
+| no badge | below 10 % | below 1.5 GiB |
+| green | from 10 % | from 1.5 GiB |
+| orange | from 50 % | from 2.5 GiB |
+| red | from 100 % | from 4 GiB |
+
+The worse of the two metrics sets the colour, and the badge names that metric:
+`108%` or `2.8G`. CPU is measured like `top`, per core, so an agent that keeps
+one core busy reads 100 % on a 4-core laptop and on a 32-core workstation alike.
+
+The **live table** shows both metrics for every pane, the process count and the
+busiest process. Open it from the command palette (*Agent resources: open live
+table*) or bind it to a key:
+
+```toml
+[[keys.command]]
+key = "prefix+shift+r"
+type = "plugin_action"
+command = "agent-resource-badges.open-report"
+description = "agent resources"
+```
+
+## Install
+
+Requires Linux, herdr 0.9.0 or newer, and a Rust toolchain (`cargo`), because
+herdr builds the plugin on install.
+
+```bash
+herdr plugin install dlepold/herdr-agent-resource-badges
+```
+
+The sampler starts at the next space switch or server start. Then add the
+badge tokens to your sidebar layout. The plugin never edits herdr's
+`config.toml` for you; print the snippet and merge it into your own rows:
+
+```bash
+herdr plugin action invoke agent-resource-badges.sidebar-config
+```
+
+```toml
+[ui.sidebar.agents]
+rows = [
+  ["state_icon", "machine", "workspace", "tab"],
+  [
+    { token = "$res_hot",  fg = "#f38ba8", bold = true },
+    { token = "$res_warn", fg = "#fab387" },
+    { token = "$res_ok",   fg = "#a6e3a1" },
+    "agent",
+  ],
+]
+```
+
+```bash
+herdr server reload-config
+```
+
+**Narrow sidebar?** herdr gives every token in a row an equal share of the
+width, so in a crowded row the badge can shrink to `10…`. Put the badge tokens
+first in the row, and hide values that are the same for most agents, for
+example `{ token = "agent", rules = [{ equals = "claude", hide = true }] }`.
+
+## Configuration
+
+Optional. Copy [`config.example.toml`](config.example.toml) to
+`$(herdr plugin config-dir agent-resource-badges)/config.toml`. Changes apply
+within one interval.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `interval_seconds` | 5 | sampling interval (1–60) |
+| `cpu_show` / `cpu_warn` / `cpu_hot` | 10 / 50 / 100 | CPU thresholds in % of one core |
+| `ram_show_mb` / `ram_warn_mb` / `ram_hot_mb` | 1536 / 2560 / 4096 | RAM thresholds in MiB |
+| `badge` | `"short"` | `"both"` shows `108% 2.8G` for wide sidebars |
+
+Actions: `open-report`, `sidebar-config`, `status`, `enable`, `disable`.
+
+## How it works
+
+- **One sampler per herdr session.** It reads `/proc` once per interval, maps
+  each pane to its shell through `pane.process_info`, and sums CPU ticks and RSS
+  over the shell's process tree.
+- **Values, not drawing.** It reports a short text through
+  `pane.report_metadata`. Placement and colour live in your herdr config, as
+  herdr intends.
+- **Self-clearing.** Every badge carries a TTL of three intervals. If the
+  sampler stops for any reason, badges vanish by themselves within seconds.
+- **Quiet on the socket.** Panes below the thresholds are cleared once and then
+  left alone; visible badges are only re-sent when they change or their TTL
+  needs refreshing.
+- **Lifecycle.** herdr runs startup hooks once and does not supervise them. The
+  startup hook and every `workspace.focused` event call `ensure`, which exits
+  at once if this session's sampler holds its lock (an OS file lock, released by
+  the kernel if the sampler dies). The sampler exits by itself when herdr is
+  unreachable three times in a row, when its binary is replaced by a reinstall,
+  or when badges are disabled.
+- **Overhead**, measured over three minutes with 51 panes and about 1,370
+  processes at the default 5-second interval: 0.35 % of one core (about 17 ms
+  per cycle, socket calls included) and 3 MB of RAM. The release binary is
+  about 0.6 MB and depends only on `serde_json`.
+
+## Limitations
+
+- Linux only for now (it reads `/proc`).
+- Processes that start and end between two samples are not counted.
+- RSS counts memory shared between processes once per process, so totals run
+  a little high. That is fine for a traffic light, not for accounting.
+- Panes on remote herdr machines are skipped.
+
+## Related
+
+[ezcorp-org/herdr-pc-ram-and-cpu-usage-overlay](https://github.com/ezcorp-org/herdr-pc-ram-and-cpu-usage-overlay)
+shows CPU and RAM per space as a share of the whole machine, plus battery and
+disk. It answers "how full is my machine"; this plugin answers "which agent".
+They work side by side.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
+
+---
+
+Made by the team behind [tutoring-agency.com](https://tutoring-agency.com).

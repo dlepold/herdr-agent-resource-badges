@@ -1,0 +1,72 @@
+# herdr plugin: Agent Resource Badges
+# Created 2026-10-22 (David Lepold + Claude Opus 5.5). Last update: 2026-10-22.
+#
+# Traffic-light CPU/RAM badges for each agent in herdr's sidebar. A badge only
+# appears while an agent is above the "show" thresholds, so a quiet sidebar stays
+# exactly as it was. The sidebar draws the badges from three tokens
+# ($res_ok, $res_warn, $res_hot) that you place and colour in herdr's own
+# config.toml; run the `sidebar-config` action to print the snippet.
+#
+# Install:    herdr plugin install dlepold/herdr-agent-resource-badges
+# Local dev:  cargo build --release && herdr plugin link .
+# Logs:       herdr plugin log list --plugin agent-resource-badges
+
+id = "agent-resource-badges"
+name = "Agent Resource Badges"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Green/orange/red CPU and RAM badges per agent in the sidebar, shown only while an agent is busy."
+platforms = ["linux"]
+
+[[build]]
+command = ["cargo", "build", "--release", "--locked"]
+
+# herdr runs startup hooks once and does not supervise them. `ensure` starts the
+# sampler unless one already holds this session's lock, and exits immediately.
+[[startup]]
+command = ["./target/release/agent-resource-badges", "ensure"]
+
+# The same idempotent check on every space switch revives the sampler after a
+# crash, a reinstall, or an install into an already running herdr server.
+[[events]]
+on = "workspace.focused"
+command = ["./target/release/agent-resource-badges", "ensure"]
+
+[[panes]]
+id = "report"
+title = "Agent resources"
+placement = "popup"
+width = "90%"
+height = "80%"
+command = ["./target/release/agent-resource-badges", "report"]
+
+# Menus and the palette list actions, not panes, so the report needs this row.
+[[actions]]
+id = "open-report"
+title = "Agent resources: open live table"
+contexts = ["workspace", "global"]
+command = ["herdr", "plugin", "pane", "open", "--plugin", "agent-resource-badges", "--entrypoint", "report", "--focus"]
+
+[[actions]]
+id = "sidebar-config"
+title = "Agent resources: print sidebar config"
+contexts = ["workspace", "global"]
+command = ["./target/release/agent-resource-badges", "sidebar-config"]
+
+[[actions]]
+id = "status"
+title = "Agent resources: sampler status"
+contexts = ["workspace", "global"]
+command = ["./target/release/agent-resource-badges", "status"]
+
+[[actions]]
+id = "enable"
+title = "Agent resources: enable badges"
+contexts = ["workspace", "global"]
+command = ["./target/release/agent-resource-badges", "enable"]
+
+[[actions]]
+id = "disable"
+title = "Agent resources: disable badges"
+contexts = ["workspace", "global"]
+command = ["./target/release/agent-resource-badges", "disable"]

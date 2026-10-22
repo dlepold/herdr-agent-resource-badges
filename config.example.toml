@@ -1,0 +1,19 @@
+# Agent Resource Badges — example configuration.
+# Copy to the path printed by `herdr plugin config-dir agent-resource-badges`
+# as config.toml. Changes are picked up within one interval; no restart needed.
+
+interval_seconds = 5   # sampling interval, 1..60; badges expire after three missed intervals
+
+# CPU in percent of ONE core (like `top`), so a busy agent can exceed 100.
+cpu_show = 10          # below this (and below ram_show_mb) no badge at all
+cpu_warn = 50          # orange from here
+cpu_hot  = 100         # red from here
+
+# RAM of the whole process tree below the pane's shell, in MiB.
+ram_show_mb = 1536
+ram_warn_mb = 2560
+ram_hot_mb  = 4096
+
+# "short" (default): the badge names only the metric that set its colour, e.g. "108%" or "2.8G".
+# "both": "108% 2.8G" — for sidebars wide enough to show it untruncated.
+badge = "short"
