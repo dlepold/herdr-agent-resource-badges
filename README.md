@@ -4,6 +4,13 @@ Green, orange and red CPU/RAM badges for every agent in the [herdr](https://herd
 sidebar. A badge only appears while an agent is actually busy, so a quiet
 sidebar looks exactly like it did before.
 
+![herdr agents panel with Agent Resource Badges: a busy agent shows a green 12% badge, another a red 108%, a third an orange 2.8G; quiet agents have no badge](docs/sidebar-badges-illustration.webp)
+
+*Illustration. The badge names the value that sets its colour: green from
+10 % CPU or 1.5 GiB, orange from 50 % or 2.5 GiB, red from 100 % or 4 GiB.*
+
+The same as plain text:
+
 ```text
 agents
 ◐ Refactor auth middle…
