@@ -15,6 +15,7 @@
 //   status            is a sampler running for this session?
 //   enable | disable  switch the badges on or off (all sessions)
 //   sidebar-config    print the [ui.sidebar.agents] snippet for herdr's config.toml
+//   selftest          check process sampling on this OS without herdr (used by CI)
 
 mod config;
 mod herdr;
@@ -28,6 +29,7 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Write};
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, ExitCode, Stdio};
@@ -49,6 +51,7 @@ fn main() -> ExitCode {
         Some("status") => status(),
         Some("enable") => enable(),
         Some("disable") => disable(),
+        Some("selftest") => selftest(),
         Some("sidebar-config") => {
             print!("{}", sidebar_snippet());
             ExitCode::SUCCESS
@@ -262,6 +265,7 @@ fn run_daemon() -> ExitCode {
 
     let mut cfg = config::load();
     let mut cfg_mtime = config::modified();
+    let exe_id = exe_identity();
     let mut sampler = Sampler::new();
     let mut panes: HashMap<String, PaneState> = HashMap::new();
     let mut failures = 0u32;
@@ -275,7 +279,7 @@ fn run_daemon() -> ExitCode {
             log(&paths, "disabled; badges cleared, exiting");
             break;
         }
-        if binary_replaced() {
+        if binary_replaced(&exe_id) {
             // A reinstall or rebuild unlinked our executable. Exit so the next
             // `ensure` starts the new build; the TTL clears our badges meanwhile.
             log(&paths, "binary replaced, exiting");
@@ -389,23 +393,29 @@ fn clear_all(herdr: &mut Herdr, panes: &mut HashMap<String, PaneState>) {
 
 /// A pane on a remote herdr machine reports a PID from that machine, which would
 /// hit an unrelated local process. Locally, a pane's shell is a child of the herdr
-/// server; after a live handoff it may be reparented, so a shell attached to one of
-/// our pseudo-terminals is accepted as well.
+/// server; after a live handoff it may be reparented, so a shell with a terminal
+/// is accepted as well.
 fn is_local_shell(pid: u32) -> bool {
-    let parent_is_herdr = fs::read_to_string(format!("/proc/{pid}/stat"))
-        .ok()
-        .and_then(|s| sample::parse_stat(&s))
-        .and_then(|p| fs::read_to_string(format!("/proc/{}/comm", p.ppid)).ok())
-        .is_some_and(|comm| comm.trim_end().starts_with("herdr"));
-    parent_is_herdr
-        || fs::read_link(format!("/proc/{pid}/fd/0"))
-            .is_ok_and(|t| t.to_string_lossy().starts_with("/dev/pts/"))
+    let parent_is_herdr = sample::read_proc(pid)
+        .and_then(|p| sample::read_proc(p.ppid))
+        .is_some_and(|parent| parent.name.starts_with("herdr"));
+    parent_is_herdr || sample::has_terminal(pid)
 }
 
-fn binary_replaced() -> bool {
-    fs::read_link("/proc/self/exe")
-        .map(|p| p.to_string_lossy().ends_with(" (deleted)"))
-        .unwrap_or(false)
+/// Path and inode of our executable at start. A rebuild or reinstall gives the path
+/// a new inode (or removes it); the sampler then exits and `ensure` starts the new
+/// build. Works the same on Linux and macOS.
+fn exe_identity() -> Option<(PathBuf, u64)> {
+    let path = env::current_exe().ok()?;
+    let ino = fs::metadata(&path).ok()?.ino();
+    Some((path, ino))
+}
+
+fn binary_replaced(start: &Option<(PathBuf, u64)>) -> bool {
+    match start {
+        Some((path, ino)) => fs::metadata(path).map(|m| m.ino() != *ino).unwrap_or(true),
+        None => false,
+    }
 }
 
 /// herdr gives every token in a row an equal share of the sidebar width, so a
@@ -425,6 +435,67 @@ fn mem_text(rss: u64) -> String {
         format!("{:.1}G", mib / 1024.0)
     } else {
         format!("{mib:.0}M")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Self-test: exercises the OS process reader without herdr (CI on Linux and macOS)
+// ---------------------------------------------------------------------------
+
+fn selftest() -> ExitCode {
+    let me = std::process::id();
+    let mut ok = true;
+    let mut check = |name: &str, pass: bool, detail: String| {
+        println!("{} {name}: {detail}", if pass { "PASS" } else { "FAIL" });
+        ok &= pass;
+    };
+
+    // A child that keeps one core busy, so the tree below us has measurable CPU.
+    let mut child = match Command::new("sh").args(["-c", "while :; do :; done"]).spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            println!("FAIL spawn busy child: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut sampler = Sampler::new();
+    sampler.sample();
+    thread::sleep(Duration::from_millis(1500));
+    let t = Instant::now();
+    let snap = sampler.sample();
+    let scan_ms = t.elapsed().as_secs_f64() * 1000.0;
+    let kid = child.id();
+    let _ = child.kill();
+    let _ = child.wait();
+
+    check("scan", snap.procs.len() >= 5, format!("{} processes in {scan_ms:.1} ms", snap.procs.len()));
+    let own = sample::read_proc(me);
+    check(
+        "own process",
+        own.as_ref().is_some_and(|p| p.rss_bytes > 512 * 1024 && !p.name.is_empty()),
+        own.as_ref()
+            .map(|p| format!("name {:?}, RSS {}, ppid {}", p.name, mem_text(p.rss_bytes), p.ppid))
+            .unwrap_or_else(|| "not readable".into()),
+    );
+    let kid_proc = snap.procs.get(&kid);
+    check(
+        "child's parent",
+        kid_proc.is_some_and(|p| p.ppid == me),
+        kid_proc.map(|p| format!("ppid {} (expected {me}), name {:?}", p.ppid, p.name)).unwrap_or_else(|| "child not found".into()),
+    );
+    match snap.tree_usage(me) {
+        Some(u) => {
+            check("tree size", u.procs >= 2, format!("{} processes below and including us", u.procs));
+            check("tree CPU", u.cpu_pct > 30.0, format!("{:.0}% (a busy child should give ~100%)", u.cpu_pct));
+            check("tree RAM", u.rss_bytes > 512 * 1024, mem_text(u.rss_bytes));
+        }
+        None => check("tree", false, "own PID missing from snapshot".into()),
+    }
+    if ok {
+        println!("selftest passed on {} {}", env::consts::OS, env::consts::ARCH);
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
     }
 }
 
