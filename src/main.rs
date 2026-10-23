@@ -423,18 +423,24 @@ fn binary_replaced(start: &Option<(PathBuf, u64)>) -> bool {
 /// just the metric that set its colour: "108%" or "2.8G".
 fn badge_text(cpu: f64, rss: u64, both: bool, cpu_dominates: bool) -> String {
     match (both, cpu_dominates) {
-        (true, _) => format!("{:.0}% {}", cpu, mem_text(rss)),
-        (false, true) => format!("{:.0}%", cpu),
+        (true, _) => format!("{}% {}", cpu_text(cpu), mem_text(rss)),
+        (false, true) => format!("{}%", cpu_text(cpu)),
         (false, false) => mem_text(rss),
     }
+}
+
+/// Rounded DOWN, so the number never reaches a threshold before the colour does
+/// (99.6 % stays "99%" in orange instead of a red-looking "100%").
+fn cpu_text(cpu: f64) -> u64 {
+    cpu.max(0.0).floor() as u64
 }
 
 fn mem_text(rss: u64) -> String {
     let mib = rss as f64 / 1_048_576.0;
     if mib >= 1024.0 {
-        format!("{:.1}G", mib / 1024.0)
+        format!("{:.1}G", (mib / 1024.0 * 10.0).floor() / 10.0)
     } else {
-        format!("{mib:.0}M")
+        format!("{:.0}M", mib.floor())
     }
 }
 
@@ -617,8 +623,8 @@ fn render(rows: &[Row], total_procs: usize, cfg: &Config, once: bool) -> String 
         let c = colour(r.level);
         let dot = if r.level == Level::Hidden { "·" } else { "●" };
         out.push_str(&format!(
-            "{c}{dot}{RESET}  {c}{:>5.0}% {:>7}{RESET} {:>5}  {:<7} {:<16} {:<40} {DIM}{}{RESET}\n",
-            r.cpu,
+            "{c}{dot}{RESET}  {c}{:>5}% {:>7}{RESET} {:>5}  {:<7} {:<16} {:<40} {DIM}{}{RESET}\n",
+            cpu_text(r.cpu),
             mem_text(r.rss),
             r.procs,
             cut(if r.agent.is_empty() { "-" } else { &r.agent }, 7),
@@ -672,6 +678,8 @@ mod tests {
     fn badge_is_short() {
         assert_eq!(badge_text(108.4, 2147483648, true, true), "108% 2.0G");
         assert_eq!(badge_text(108.4, 1000 << 20, false, true), "108%");
-        assert_eq!(badge_text(3.0, 2867 << 20, false, false), "2.8G");
+        assert_eq!(badge_text(3.0, 2867 << 20, false, false), "2.7G");
+        assert_eq!(badge_text(99.6, 0, false, true), "99%");
+        assert_eq!(badge_text(3.0, 2559 << 20, false, false), "2.4G");
     }
 }

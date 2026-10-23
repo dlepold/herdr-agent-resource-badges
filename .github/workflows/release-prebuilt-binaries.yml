@@ -1,7 +1,7 @@
-# Builds the static Linux binaries for a release tag (vX.Y.Z) and attaches them,
+# Builds the Linux (static musl) and macOS binaries for a release tag (vX.Y.Z) and attaches them,
 # with SHA256SUMS and build-provenance attestations, to the GitHub release.
 # scripts/fetch-or-build-binary.sh downloads exactly these files on install.
-# Created 2026-10-22 (David Lepold + Claude Opus 5.5). Last update: 2026-10-22.
+# Created 2026-10-22 (David Lepold + Claude Opus 5.5). Last update: 2026-10-22 (macOS, selftest).
 
 name: release prebuilt binaries
 
@@ -24,6 +24,10 @@ jobs:
             runner: ubuntu-24.04
           - target: aarch64-unknown-linux-musl
             runner: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            runner: macos-15
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -54,6 +58,7 @@ jobs:
           out=$(./target/${{ matrix.target }}/release/agent-resource-badges --version)
           echo "$out"
           test "$out" = "agent-resource-badges ${GITHUB_REF_NAME#v}"
+          ./target/${{ matrix.target }}/release/agent-resource-badges selftest
           cp target/${{ matrix.target }}/release/agent-resource-badges agent-resource-badges-${{ matrix.target }}
 
       - uses: actions/attest-build-provenance@v2

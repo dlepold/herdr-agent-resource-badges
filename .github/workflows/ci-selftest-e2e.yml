@@ -1,0 +1,50 @@
+# Tests every push and pull request on the four platforms the plugin ships for:
+# unit tests, the process-sampling selftest, and an end-to-end run against a real,
+# isolated herdr server (scripts/ci-e2e-with-real-herdr.sh). The macOS runners are
+# the only place the libproc reader runs before a release.
+# Created 2026-10-22 (David Lepold + Claude Opus 5.5). Last update: 2026-10-22.
+
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+          - runner: ubuntu-24.04-arm
+          - runner: macos-15
+          - runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        run: |
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+
+      - name: Unit tests and release build
+        run: |
+          uname -a
+          rustc --version
+          cargo test --locked
+          cargo build --release --locked
+
+      - name: Selftest (process sampling on this OS)
+        run: ./target/release/agent-resource-badges selftest
+
+      - name: End-to-end with a real herdr server
+        run: sh scripts/ci-e2e-with-real-herdr.sh

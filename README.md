@@ -52,9 +52,9 @@ description = "agent resources"
 
 ## Install
 
-Requires Linux and herdr 0.9.0 or newer. No Rust toolchain is needed on
-x86_64 and aarch64: the install step downloads the prebuilt static binary for
-that version from the [releases](https://github.com/dlepold/herdr-agent-resource-badges/releases)
+Requires Linux or macOS and herdr 0.9.0 or newer. No Rust toolchain is needed
+on x86_64 and aarch64 Linux or on macOS (Apple Silicon and Intel): the install
+step downloads the prebuilt binary for that version from the [releases](https://github.com/dlepold/herdr-agent-resource-badges/releases)
 and checks it against the release's `SHA256SUMS`. On other CPUs, without
 network, or if the download does not verify, it builds from source with
 `cargo` instead.
@@ -120,9 +120,10 @@ Actions: `open-report`, `sidebar-config`, `status`, `enable`, `disable`.
 
 ## How it works
 
-- **One sampler per herdr session.** It reads `/proc` once per interval, maps
-  each pane to its shell through `pane.process_info`, and sums CPU ticks and RSS
-  over the shell's process tree.
+- **One sampler per herdr session.** Once per interval it reads every process
+  (from `/proc` on Linux, through `libproc` on macOS, the interface `top` uses),
+  maps each pane to its shell through `pane.process_info`, and sums CPU time and
+  resident memory over the shell's process tree.
 - **Values, not drawing.** It reports a short text through
   `pane.report_metadata`. Placement and colour live in your herdr config, as
   herdr intends.
@@ -138,13 +139,15 @@ Actions: `open-report`, `sidebar-config`, `status`, `enable`, `disable`.
   unreachable three times in a row, when its binary is replaced by a reinstall,
   or when badges are disabled.
 - **Overhead**, measured over three minutes with 51 panes and about 1,370
-  processes at the default 5-second interval: 0.35 % of one core (about 17 ms
-  per cycle, socket calls included) and 3 MB of RAM. The release binary is
+  processes at the default 5-second interval on Linux: 0.35 % of one core
+  (about 17 ms per cycle, socket calls included) and 3 MB of RAM. The release binary is
   about 0.6 MB and depends only on `serde_json`.
 
 ## Limitations
 
-- Linux only for now (it reads `/proc`).
+- Linux and macOS. Windows is not supported.
+- On macOS, processes of other users (for example something started with
+  `sudo`) cannot be read without privileges and are left out of the totals.
 - Processes that start and end between two samples are not counted.
 - RSS counts memory shared between processes once per process, so totals run
   a little high. That is fine for a traffic light, not for accounting.
@@ -157,12 +160,23 @@ shows CPU and RAM per space as a share of the whole machine, plus battery and
 disk. It answers "how full is my machine"; this plugin answers "which agent".
 They work side by side.
 
+## Testing
+
+Every push runs `.github/workflows/ci-selftest-e2e.yml` on x86_64 and arm64
+Linux and on Apple Silicon and Intel macOS: the unit tests, `agent-resource-badges
+selftest` (spawns a busy child and checks the process tree, CPU and RAM without
+herdr), and `scripts/ci-e2e-with-real-herdr.sh`, which starts an isolated herdr
+server, gives one pane a busy loop and checks that exactly that pane gets a
+badge and loses it again after `disable`. The script also runs locally without
+touching your own herdr, because it points `HOME` at a temporary directory.
+
 ## Releasing
 
 Bump `version` in `herdr-plugin.toml` and `Cargo.toml` (they must match), run
 `cargo build` once to update `Cargo.lock`, commit, and push a tag `vX.Y.Z`.
 The workflow in `.github/workflows/release-prebuilt-binaries.yml` tests and
-builds both binaries on native x86_64 and arm64 runners and attaches them with
+builds four binaries (static Linux x86_64 and aarch64, macOS arm64 and x86_64)
+on native runners, runs the selftest on each, and attaches them with
 `SHA256SUMS` to the release. Until it has finished, installs of the new version
 fall back to building from source.
 

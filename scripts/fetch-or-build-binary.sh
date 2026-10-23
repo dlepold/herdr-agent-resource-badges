@@ -1,10 +1,11 @@
 #!/bin/sh
 # herdr build step for agent-resource-badges (runs during `herdr plugin install`).
-# Created 2026-10-22 (David Lepold + Claude Opus 5.5). Last update: 2026-10-22.
+# Created 2026-10-22 (David Lepold + Claude Opus 5.5). Last update: 2026-10-22 (macOS targets).
 #
 # Puts the plugin binary at target/release/agent-resource-badges, the path every
 # command in herdr-plugin.toml expects:
-#   1. Download the prebuilt static (musl) binary for this CPU from the GitHub
+#   1. Download the prebuilt binary for this OS and CPU (static musl on Linux,
+#      native on macOS) from the GitHub
 #      release that matches the manifest version, and check it against the
 #      release's SHA256SUMS and its own --version output.
 #   2. If that fails (offline, other CPU, release not published yet), build from
@@ -29,6 +30,8 @@ VERSION=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' herdr-plugin.toml | head -n 1)
 case "$(uname -s)-$(uname -m)" in
     Linux-x86_64 | Linux-amd64) TARGET="x86_64-unknown-linux-musl" ;;
     Linux-aarch64 | Linux-arm64) TARGET="aarch64-unknown-linux-musl" ;;
+    Darwin-arm64) TARGET="aarch64-apple-darwin" ;;
+    Darwin-x86_64) TARGET="x86_64-apple-darwin" ;;
     *) TARGET="" ;;
 esac
 
