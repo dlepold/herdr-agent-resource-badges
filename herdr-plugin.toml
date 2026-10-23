@@ -13,13 +13,17 @@
 
 id = "agent-resource-badges"
 name = "Agent Resource Badges"
-version = "0.1.0"
+version = "0.1.1"
 min_herdr_version = "0.9.0"
 description = "Green/orange/red CPU and RAM badges per agent in the sidebar, shown only while an agent is busy."
 platforms = ["linux"]
 
+# No Rust needed on x86_64 and aarch64 Linux: the script downloads this version's
+# prebuilt static binary from GitHub Releases and verifies it against the release's
+# SHA256SUMS. Without network, on other CPUs, or with
+# AGENT_RESOURCE_BADGES_FROM_SOURCE=1 it runs `cargo build --release --locked`.
 [[build]]
-command = ["cargo", "build", "--release", "--locked"]
+command = ["sh", "scripts/fetch-or-build-binary.sh"]
 
 # herdr runs startup hooks once and does not supervise them. `ensure` starts the
 # sampler unless one already holds this session's lock, and exits immediately.

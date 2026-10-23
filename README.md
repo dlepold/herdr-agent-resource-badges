@@ -52,11 +52,25 @@ description = "agent resources"
 
 ## Install
 
-Requires Linux, herdr 0.9.0 or newer, and a Rust toolchain (`cargo`), because
-herdr builds the plugin on install.
+Requires Linux and herdr 0.9.0 or newer. No Rust toolchain is needed on
+x86_64 and aarch64: the install step downloads the prebuilt static binary for
+that version from the [releases](https://github.com/dlepold/herdr-agent-resource-badges/releases)
+and checks it against the release's `SHA256SUMS`. On other CPUs, without
+network, or if the download does not verify, it builds from source with
+`cargo` instead.
 
 ```bash
 herdr plugin install dlepold/herdr-agent-resource-badges
+```
+
+To always build from source, set `AGENT_RESOURCE_BADGES_FROM_SOURCE=1` for the
+install command. The binaries are built by GitHub Actions from the tagged
+commit and carry a signed build-provenance attestation, which you can check
+after installing:
+
+```bash
+root=$(herdr plugin list --plugin agent-resource-badges --json | jq -r '.result.plugins[0].plugin_root')
+gh attestation verify "$root/target/release/agent-resource-badges" --repo dlepold/herdr-agent-resource-badges
 ```
 
 The sampler starts at the next space switch or server start. Then add the
@@ -142,6 +156,15 @@ Actions: `open-report`, `sidebar-config`, `status`, `enable`, `disable`.
 shows CPU and RAM per space as a share of the whole machine, plus battery and
 disk. It answers "how full is my machine"; this plugin answers "which agent".
 They work side by side.
+
+## Releasing
+
+Bump `version` in `herdr-plugin.toml` and `Cargo.toml` (they must match), run
+`cargo build` once to update `Cargo.lock`, commit, and push a tag `vX.Y.Z`.
+The workflow in `.github/workflows/release-prebuilt-binaries.yml` tests and
+builds both binaries on native x86_64 and arm64 runners and attaches them with
+`SHA256SUMS` to the release. Until it has finished, installs of the new version
+fall back to building from source.
 
 ## License
 

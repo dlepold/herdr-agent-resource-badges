@@ -1,6 +1,6 @@
 [package]
 name = "agent-resource-badges"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.89"
 description = "herdr plugin: traffic-light CPU and RAM badges for each agent in the sidebar, shown only when an agent is busy"
