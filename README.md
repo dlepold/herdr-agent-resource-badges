@@ -66,7 +66,7 @@ herdr plugin install dlepold/herdr-agent-resource-badges
 To always build from source, set `AGENT_RESOURCE_BADGES_FROM_SOURCE=1` for the
 install command. The binaries are built by GitHub Actions from the tagged
 commit and carry a signed build-provenance attestation, which you can check
-after installing:
+after installing (needs GitHub CLI 2.49 or newer, plus `jq`):
 
 ```bash
 root=$(herdr plugin list --plugin agent-resource-badges --json | jq -r '.result.plugins[0].plugin_root')
