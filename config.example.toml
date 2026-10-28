@@ -17,3 +17,15 @@ ram_hot_mb  = 4096
 # "short" (default): the badge names only the metric that set its colour, e.g. "108%" or "2.8G".
 # "both": "108% 2.8G" — for sidebars wide enough to show it untruncated.
 badge = "short"
+
+# Throttle (off by default). A pane whose tree is at or above throttle_cpu % CPU while
+# the pane has NO focus gets its process tree set to nice +throttle_nice (5 = "Low" in
+# GNOME System Monitor); the pane you focus goes back to nice 0 at once. Lowering nice
+# needs root: either  sudo setcap cap_sys_nice+ep <plugin binary>  or passwordless
+# sudo for  <plugin binary> setnice  — without one of them the throttle stays off
+# (see the sampler log). Tools that pin nice values, e.g. Ananicy rules for `claude`,
+# must not cover the agents; they would undo the throttle every scan. While enabled,
+# processes below a pane's shell that run at a NEGATIVE nice value (herdr starts its
+# shells with a raised priority) are brought up to 0 as well.
+throttle_nice = 0      # 0 = off; 1..19 = nice value for busy, unfocused panes
+throttle_cpu  = 90     # % of one core, same metric as the badge

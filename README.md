@@ -122,8 +122,53 @@ within one interval.
 | `cpu_show` / `cpu_warn` / `cpu_hot` | 10 / 50 / 100 | CPU thresholds in % of one core |
 | `ram_show_mb` / `ram_warn_mb` / `ram_hot_mb` | 1536 / 2560 / 4096 | RAM thresholds in MiB |
 | `badge` | `"short"` | `"both"` shows `108% 2.8G` for wide sidebars |
+| `throttle_nice` | 0 (off) | nice value (1–19) for busy panes **without focus**; see below |
+| `throttle_cpu` | 90 | CPU % of one core from which a pane is throttled |
 
 Actions: `open-report`, `sidebar-config`, `status`, `enable`, `disable`.
+
+## Throttling busy background agents (optional)
+
+With a dozen agents running, the one you are typing in and the rest of your
+desktop can get sluggish. Set `throttle_nice = 5` and the plugin lowers the CPU
+priority of every pane that is **busy (from `throttle_cpu` %) and not focused**:
+its whole process tree runs at nice +5 ("Low" in GNOME's System Monitor), which
+under contention gives it roughly a third of a normal process's CPU share and
+costs nothing while the machine is idle. The pane you focus is never throttled,
+and the moment a throttled pane gets focus its tree goes back to nice 0: at once
+through herdr's `pane.focused` event (the `unnice` hook), and at the latest on
+the next sampling round. The throttle is released on every exit path as well
+(disable, rebuild, herdr gone, pane closed).
+
+While the throttle is enabled, no process below a pane's shell runs at a
+**negative** nice value either: herdr starts its pane shells with a raised
+priority, which every agent launched inside would inherit, and "High" priority
+for a background job is the opposite of what you want. Such processes are
+brought up to nice 0 (no privileges needed), so the three states are simple:
+the focused pane at 0, idle background panes at 0, busy background panes at
++`throttle_nice`.
+
+Raising a nice value needs no privileges, lowering it back does. The sampler
+probes once at start, on a throw-away `sleep` child, whether it can lower nice
+and otherwise leaves the throttle off and says why in its log. Grant it in one
+of two ways:
+
+```bash
+# a) the binary may lower nice itself (survives until the next rebuild/reinstall)
+sudo setcap cap_sys_nice+ep "$(herdr plugin list --plugin agent-resource-badges --json | jq -r '.result.plugins[0].plugin_root')/target/release/agent-resource-badges"
+# b) passwordless sudo for the plugin's own root helper, e.g. in /etc/sudoers.d/herdr-agent-resource-badges:
+#    youruser ALL=(root) NOPASSWD: /path/to/agent-resource-badges setnice *
+```
+
+The `setnice` helper only ever changes the PIDs it is given to the value it is
+given; the sampler calls it as `sudo -n <binary> setnice 0 <pids…>`.
+
+**Other tools that pin nice values must not cover the agents.** Ananicy (and
+ananicy-cpp) re-applies its rules every scan and would undo the throttle within
+seconds; remove rules such as `{ "name": "claude", "nice": 0 }` for the agent
+binaries and **restart** the daemon (a reload keeps its process cache). The live
+table shows the agent process's nice value in the `NICE` column and marks the
+focused pane with `▶`.
 
 ## How it works
 

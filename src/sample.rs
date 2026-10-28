@@ -1,6 +1,6 @@
 // Process sampling: one scan of all processes per interval, CPU as time used since
 // the previous scan. The OS-specific readers live in procs_linux.rs and procs_macos.rs.
-// Created 2026-10-22 (David Lepold + Claude Opus 5.5). Last update: 2026-10-22 (macOS split).
+// Created 2026-10-22 (David Lepold + Claude Opus 5.5). Last update: 2026-10-23 (nice value, tree_pids).
 //
 // CPU is reported like `top`: 100 % = one fully busy core, so a pane can exceed 100 %.
 // RAM is the summed resident memory of the pane's process tree. Shared pages (e.g. the
@@ -28,6 +28,8 @@ pub struct Proc {
     /// `os::start_marker_now()`, to tell a reused PID from the same process.
     pub start: u64,
     pub rss_bytes: u64,
+    /// Scheduling nice value (-20..19); the throttle reads it before changing it.
+    pub nice: i32,
     pub name: String,
 }
 
@@ -87,20 +89,41 @@ impl Sampler {
 }
 
 impl Snapshot {
+    /// Every PID in the process tree below `root`, including `root` itself (first).
+    /// Empty when `root` is not in the snapshot.
+    pub fn tree_pids(&self, root: u32) -> Vec<u32> {
+        let mut out = Vec::new();
+        if !self.procs.contains_key(&root) {
+            return out;
+        }
+        let mut stack = vec![root];
+        while let Some(pid) = stack.pop() {
+            if !self.procs.contains_key(&pid) {
+                continue;
+            }
+            if out.len() > self.procs.len() {
+                break; // defensive: a malformed parent map can never loop forever
+            }
+            out.push(pid);
+            if let Some(kids) = self.children.get(&pid) {
+                // PID 0 is its own parent on macOS; never walk into the root again.
+                stack.extend(kids.iter().filter(|&&k| k != pid));
+            }
+        }
+        out
+    }
+
     /// Sums the whole process tree below `root` (normally the pane's shell).
     pub fn tree_usage(&self, root: u32) -> Option<Usage> {
-        if !self.procs.contains_key(&root) {
+        let pids = self.tree_pids(root);
+        if pids.is_empty() {
             return None;
         }
         let mut usage = Usage::default();
         let mut ns = 0u64;
         let mut top = (0u64, 0u64);
-        let mut stack = vec![root];
-        while let Some(pid) = stack.pop() {
+        for pid in pids {
             let Some(p) = self.procs.get(&pid) else { continue };
-            if usage.procs > self.procs.len() {
-                break; // defensive: a malformed parent map can never loop forever
-            }
             let used = self.cpu_ns.get(&pid).copied().unwrap_or(0);
             usage.procs += 1;
             usage.rss_bytes += p.rss_bytes;
@@ -109,12 +132,13 @@ impl Snapshot {
                 top = (used, p.rss_bytes);
                 usage.top_name = p.name.clone();
             }
-            if let Some(kids) = self.children.get(&pid) {
-                // PID 0 is its own parent on macOS; never walk into the root again.
-                stack.extend(kids.iter().filter(|&&k| k != pid));
-            }
         }
         usage.cpu_pct = if self.elapsed > 0.0 { ns as f64 / 1e9 / self.elapsed * 100.0 } else { 0.0 };
         Some(usage)
+    }
+
+    /// Nice value of one process in this snapshot.
+    pub fn nice_of(&self, pid: u32) -> Option<i32> {
+        self.procs.get(&pid).map(|p| p.nice)
     }
 }

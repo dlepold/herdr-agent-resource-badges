@@ -1,5 +1,5 @@
 // agent-resource-badges — traffic-light CPU/RAM badges per agent in the herdr sidebar.
-// Created 2026-10-22 (David Lepold + Claude Opus 5.5). Last update: 2026-10-22.
+// Created 2026-10-22 (David Lepold + Claude Opus 5.5). Last update: 2026-10-23 (throttle).
 //
 // The sampler reads /proc once per interval, maps each herdr pane to the process tree
 // below its shell (`pane.process_info` -> shell_pid) and reports a short text such as
@@ -7,6 +7,12 @@
 // under one of three tokens ($res_ok, $res_warn, $res_hot) that the user colours in
 // herdr's own config. Every report carries a TTL, so badges vanish by themselves if
 // the sampler stops.
+//
+// Throttle (optional, `throttle_nice` in config.toml): a pane whose tree is above
+// `throttle_cpu` % CPU while the pane has NO focus gets its tree set to that nice
+// value, so the agent you are looking at and the rest of the desktop stay responsive.
+// The moment the pane is focused the tree goes back to nice 0 — at once through the
+// `pane.focused` hook (`unnice`), and at the latest on the next sampling round.
 //
 // Subcommands:
 //   ensure            start the sampler for this herdr session unless one runs (idempotent)
@@ -16,14 +22,18 @@
 //   enable | disable  switch the badges on or off (all sessions)
 //   sidebar-config    print the [ui.sidebar.agents] snippet for herdr's config.toml
 //   selftest          check process sampling on this OS without herdr (used by CI)
+//   unnice            hook for `pane.focused`: restore nice 0 for the focused pane's tree
+//   setnice N PID…    root helper used through `sudo -n` to lower nice values
 
 mod config;
 mod herdr;
+mod nice;
 mod sample;
 
 use config::{Config, Level, PLUGIN_ID};
 use herdr::Herdr;
-use sample::Sampler;
+use nice::Lower;
+use sample::{Sampler, Snapshot};
 use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::env;
@@ -52,6 +62,8 @@ fn main() -> ExitCode {
         Some("enable") => enable(),
         Some("disable") => disable(),
         Some("selftest") => selftest(),
+        Some("unnice") => unnice(),
+        Some("setnice") => nice::setnice_cli(&args[1..]),
         Some("sidebar-config") => {
             print!("{}", sidebar_snippet());
             ExitCode::SUCCESS
@@ -62,7 +74,7 @@ fn main() -> ExitCode {
         }
         _ => {
             eprintln!(
-                "usage: {PLUGIN_ID} <ensure|run|report [--once]|status|enable|disable|sidebar-config>"
+                "usage: {PLUGIN_ID} <ensure|run|report [--once]|status|enable|disable|sidebar-config|unnice|setnice N PID…>"
             );
             ExitCode::from(2)
         }
@@ -210,6 +222,17 @@ fn status() -> ExitCode {
     println!("{PLUGIN_ID} {VERSION}");
     println!("  sampler   {running}");
     println!("  badges    {}", if paths.disabled.exists() { "disabled" } else { "enabled" });
+    let cfg = config::load();
+    if cfg.throttle_enabled() {
+        println!(
+            "  throttle  nice +{} for unfocused panes from {:.0}% CPU · lowering via {}",
+            cfg.throttle_nice,
+            cfg.throttle_cpu,
+            nice::probe_lower().label()
+        );
+    } else {
+        println!("  throttle  off (set throttle_nice = 5 in config.toml to enable)");
+    }
     println!("  socket    {}", herdr.socket.display());
     println!("  config    {}", config::config_path().display());
     println!("  log       {}", paths.log.display());
@@ -246,6 +269,67 @@ struct PaneState {
     shown: Level,
     last_text: String,
     last_sent: Option<Instant>,
+    /// From `pane.list`; exactly the pane the user is typing in.
+    focused: bool,
+    /// "agent · title" for log lines.
+    label: String,
+    /// The tree is currently at the throttle nice value because of us.
+    throttled: bool,
+    /// Normalisation (negative nice -> 0) is logged once per pane, then done silently:
+    /// tools like ananicy may re-apply a negative value to short-lived children every
+    /// scan, and a log line per round would be noise.
+    normalize_logged: bool,
+}
+
+/// What the throttle does with one pane this round. Pure, so it can be tested.
+#[derive(Debug, PartialEq, Eq)]
+enum Throttle {
+    Keep,
+    Apply,
+    Release,
+}
+
+fn throttle_step(enabled: bool, focused: bool, throttled: bool, cpu: f64, from_cpu: f64) -> Throttle {
+    match (enabled, focused, throttled) {
+        (false, _, true) | (_, true, true) => Throttle::Release,
+        (true, false, false) if cpu >= from_cpu => Throttle::Apply,
+        _ => Throttle::Keep,
+    }
+}
+
+/// Raises every process below the pane's shell (not the shell itself, which is idle
+/// anyway) that still sits below the throttle value. Runs every round while the pane
+/// is throttled, so late-born children and processes some other tool reset are caught
+/// again; a few setpriority calls per round cost nothing. Returns how many were raised.
+fn throttle_apply(snap: &Snapshot, shell: u32, value: i32) -> usize {
+    snap.tree_pids(shell)
+        .into_iter()
+        .filter(|&p| p != shell)
+        .flat_map(|p| nice::matching_tasks(p, |n| n < value))
+        .filter(|&p| nice::set(p, value).is_ok())
+        .count()
+}
+
+/// herdr starts pane shells at a negative nice value (-4 here), which every agent
+/// started inside inherits: "High" priority for a background job is the opposite of
+/// what the throttle is for. While the throttle is enabled, anything below a pane's
+/// shell (the shell included) that runs below nice 0 is brought up to 0. Raising a
+/// nice value needs no privileges. Returns how many were changed.
+fn normalize_negative(snap: &Snapshot, shell: u32) -> usize {
+    snap.tree_pids(shell)
+        .into_iter()
+        .flat_map(|p| nice::matching_tasks(p, |n| n < 0))
+        .filter(|&p| nice::set(p, 0).is_ok())
+        .count()
+}
+
+/// PIDs below the shell that currently carry the throttle value — the ones to restore.
+fn throttled_pids(snap: &Snapshot, shell: u32, value: i32) -> Vec<u32> {
+    snap.tree_pids(shell)
+        .into_iter()
+        .filter(|&p| p != shell)
+        .flat_map(|p| nice::matching_tasks(p, |n| n == value))
+        .collect()
 }
 
 fn run_daemon() -> ExitCode {
@@ -271,25 +355,40 @@ fn run_daemon() -> ExitCode {
     let mut failures = 0u32;
     sampler.sample(); // primes the CPU counters; the first real delta follows
 
+    // How a raised nice value can be lowered again; probed once, when the throttle
+    // is (or becomes) enabled. Without a way to lower, the throttle stays off: a tree
+    // we could not restore would stay slow for good.
+    let mut lower: Option<Lower> = None;
+    let mut throttle_on = throttle_ready(&cfg, &mut lower, &paths);
+
     loop {
         thread::sleep(Duration::from_secs_f64(cfg.interval_seconds));
 
         if paths.disabled.exists() {
             clear_all(&mut herdr, &mut panes);
+            release_all(&mut sampler, &mut panes, &cfg, &lower, &paths, "disabled");
             log(&paths, "disabled; badges cleared, exiting");
             break;
         }
         if binary_replaced(&exe_id) {
             // A reinstall or rebuild unlinked our executable. Exit so the next
             // `ensure` starts the new build; the TTL clears our badges meanwhile.
+            release_all(&mut sampler, &mut panes, &cfg, &lower, &paths, "binary replaced");
             log(&paths, "binary replaced, exiting");
             break;
         }
         let mtime = config::modified();
         if mtime != cfg_mtime {
+            let old = cfg.clone();
             cfg = config::load();
             cfg_mtime = mtime;
             log(&paths, &format!("config reloaded: {cfg:?}"));
+            if old.throttle_nice != cfg.throttle_nice && old.throttle_enabled() {
+                // The value changed (or the throttle went off): restore with the OLD value,
+                // otherwise those processes would never be found again.
+                release_all(&mut sampler, &mut panes, &old, &lower, &paths, "config changed");
+            }
+            throttle_on = throttle_ready(&cfg, &mut lower, &paths);
         }
 
         let list = match herdr.panes() {
@@ -302,6 +401,7 @@ fn run_daemon() -> ExitCode {
                 log(&paths, &format!("herdr unreachable ({failures}/3): {e}"));
                 if failures >= 3 {
                     // The server is gone; never outlive it.
+                    release_all(&mut sampler, &mut panes, &cfg, &lower, &paths, "herdr gone");
                     break;
                 }
                 continue;
@@ -312,7 +412,8 @@ fn run_daemon() -> ExitCode {
         let mut seen = HashSet::with_capacity(list.len());
         for p in &list {
             let Some(id) = p.get("pane_id").and_then(Value::as_str) else { continue };
-            let terminal = p.get("terminal_id").and_then(Value::as_str).unwrap_or("").to_string();
+            let s = |k: &str| p.get(k).and_then(Value::as_str).unwrap_or("");
+            let terminal = s("terminal_id").to_string();
             seen.insert(id.to_string());
             let st = panes.entry(id.to_string()).or_insert_with(|| PaneState {
                 terminal_id: terminal.clone(),
@@ -322,17 +423,36 @@ fn run_daemon() -> ExitCode {
                 shown: Level::Hidden,
                 last_text: String::new(),
                 last_sent: None,
+                focused: false,
+                label: String::new(),
+                throttled: false,
+                normalize_logged: false,
             });
+            st.focused = p.get("focused").and_then(Value::as_bool).unwrap_or(false);
+            st.label = format!("{} · {}", s("agent"), s("terminal_title_stripped"));
             if st.terminal_id != terminal {
                 // Same pane id, new terminal: the shell was restarted.
                 st.terminal_id = terminal;
                 st.shell_pid = None;
                 st.next_lookup = now;
                 st.cpu_ema = None;
+                st.throttled = false;
             }
             if st.shell_pid.is_none() && now >= st.next_lookup {
                 st.shell_pid = herdr.shell_pid(id).ok().flatten().filter(|&pid| is_local_shell(pid));
                 st.next_lookup = now + LOOKUP_RETRY;
+            }
+        }
+        // A closed pane normally takes its processes with it; if some survive, they
+        // must not stay throttled with nobody left to restore them.
+        let gone: Vec<String> = panes.keys().filter(|id| !seen.contains(*id)).cloned().collect();
+        if gone.iter().any(|id| panes[id].throttled) {
+            let snap = sampler.sample();
+            for id in &gone {
+                let st = panes.get_mut(id).unwrap();
+                if st.throttled {
+                    release_pane(&snap, id, st, &cfg, &lower, &paths, "pane closed");
+                }
             }
         }
         panes.retain(|id, _| seen.contains(id));
@@ -343,6 +463,7 @@ fn run_daemon() -> ExitCode {
             let Some(pid) = st.shell_pid else { continue };
             let Some(usage) = snap.tree_usage(pid) else {
                 st.shell_pid = None; // shell gone; look it up again next round
+                st.throttled = false;
                 continue;
             };
             // Light smoothing so a single spike does not flash the badge.
@@ -350,6 +471,39 @@ fn run_daemon() -> ExitCode {
             st.cpu_ema = Some(cpu);
             let (cpu_level, ram_level) = cfg.levels(cpu, usage.rss_bytes);
             let level = cpu_level.max(ram_level);
+
+            if throttle_on {
+                let n = normalize_negative(&snap, pid);
+                if n > 0 && !st.normalize_logged {
+                    log(&paths, &format!("normalize {id} [{}]: nice 0 on {n} threads that ran below 0 (further ones silently)", st.label));
+                    st.normalize_logged = true;
+                }
+            }
+            match throttle_step(throttle_on, st.focused, st.throttled, cpu, cfg.throttle_cpu) {
+                Throttle::Apply => {
+                    let n = throttle_apply(&snap, pid, cfg.throttle_nice);
+                    st.throttled = true;
+                    log(
+                        &paths,
+                        &format!(
+                            "throttle {id} [{}] {:.0}% CPU, no focus: nice +{} on {n} threads across {} processes",
+                            st.label, cpu, cfg.throttle_nice, usage.procs
+                        ),
+                    );
+                }
+                Throttle::Release => {
+                    let why = if st.focused { "focused" } else { "throttle off" };
+                    release_pane(&snap, id, st, &cfg, &lower, &paths, why);
+                }
+                Throttle::Keep => {
+                    if st.throttled {
+                        // Children inherit their parent's nice value, so most new
+                        // processes arrive throttled; this catches the rest, e.g. after
+                        // a focus flip too short for the sampler to notice.
+                        throttle_apply(&snap, pid, cfg.throttle_nice);
+                    }
+                }
+            }
 
             if level == Level::Hidden {
                 if st.shown != Level::Hidden && send(&mut herdr, id, Level::Hidden, "", None) {
@@ -388,6 +542,127 @@ fn clear_all(herdr: &mut Herdr, panes: &mut HashMap<String, PaneState>) {
             send(herdr, id, Level::Hidden, "", None);
             st.shown = Level::Hidden;
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Throttle helpers
+// ---------------------------------------------------------------------------
+
+/// True when the throttle is enabled AND a raised nice value can be lowered again.
+/// The probe runs once per sampler life; its outcome is logged either way.
+fn throttle_ready(cfg: &Config, lower: &mut Option<Lower>, paths: &Paths) -> bool {
+    if !cfg.throttle_enabled() {
+        return false;
+    }
+    if lower.is_none() {
+        let probe = nice::probe_lower();
+        match &probe {
+            Lower::Unavailable(why) => log(paths, &format!("throttle OFF: {why}")),
+            how => log(
+                paths,
+                &format!(
+                    "throttle ON: nice +{} for unfocused panes from {:.0}% CPU; lowering via {}",
+                    cfg.throttle_nice,
+                    cfg.throttle_cpu,
+                    how.label()
+                ),
+            ),
+        }
+        *lower = Some(probe);
+    }
+    !matches!(lower, Some(Lower::Unavailable(_)))
+}
+
+/// Puts one pane's tree back to nice 0 and forgets the throttle state either way.
+fn release_pane(
+    snap: &Snapshot,
+    id: &str,
+    st: &mut PaneState,
+    cfg: &Config,
+    lower: &Option<Lower>,
+    paths: &Paths,
+    why: &str,
+) {
+    st.throttled = false;
+    let Some(shell) = st.shell_pid else { return };
+    let pids = throttled_pids(snap, shell, cfg.throttle_nice);
+    if pids.is_empty() {
+        return; // already restored, e.g. by the `unnice` hook
+    }
+    let how = lower.clone().unwrap_or(Lower::Unavailable("not probed".into()));
+    match nice::lower(&pids, 0, &how) {
+        Ok(n) => log(paths, &format!("release {id} [{}] ({why}): nice 0 on {n} threads via {}", st.label, how.label())),
+        Err(e) => log(paths, &format!("release {id} [{}] ({why}) FAILED for {} threads: {e}", st.label, pids.len())),
+    }
+}
+
+/// Restores every throttled pane; used on every exit path of the sampler.
+fn release_all(
+    sampler: &mut Sampler,
+    panes: &mut HashMap<String, PaneState>,
+    cfg: &Config,
+    lower: &Option<Lower>,
+    paths: &Paths,
+    why: &str,
+) {
+    if !panes.values().any(|st| st.throttled) {
+        return;
+    }
+    let snap = sampler.sample();
+    for (id, st) in panes.iter_mut() {
+        if st.throttled {
+            release_pane(&snap, id, st, cfg, lower, paths, why);
+        }
+    }
+}
+
+/// Hook for herdr's `pane.focused` event: the focused pane's tree goes back to nice 0
+/// right away instead of on the next sampling round. herdr passes the pane in
+/// HERDR_PANE_ID; without it every focused pane is handled.
+fn unnice() -> ExitCode {
+    let cfg = config::load();
+    if !cfg.throttle_enabled() {
+        return ExitCode::SUCCESS;
+    }
+    let mut herdr = Herdr::from_env();
+    let paths = Paths::new(&herdr);
+    let ids: Vec<String> = match env::var("HERDR_PANE_ID") {
+        Ok(id) if !id.is_empty() => vec![id],
+        _ => herdr
+            .panes()
+            .unwrap_or_default()
+            .iter()
+            .filter(|p| p.get("focused").and_then(Value::as_bool).unwrap_or(false))
+            .filter_map(|p| p.get("pane_id").and_then(Value::as_str).map(str::to_string))
+            .collect(),
+    };
+    let snap = Sampler::new().sample();
+    let mut ok = true;
+    for id in ids {
+        let Some(shell) = herdr.shell_pid(&id).ok().flatten().filter(|&pid| is_local_shell(pid)) else {
+            continue;
+        };
+        let pids = throttled_pids(&snap, shell, cfg.throttle_nice);
+        if pids.is_empty() {
+            continue;
+        }
+        match nice::lower_best_effort(&pids, 0) {
+            Ok(n) => {
+                println!("{PLUGIN_ID}: {id} focused: nice 0 on {n} threads");
+                log(&paths, &format!("unnice {id} (focused hook): nice 0 on {n} threads"));
+            }
+            Err(e) => {
+                eprintln!("{PLUGIN_ID}: {id}: {e}");
+                log(&paths, &format!("unnice {id} FAILED: {e}"));
+                ok = false;
+            }
+        }
+    }
+    if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
     }
 }
 
@@ -514,6 +789,9 @@ struct Row {
     cpu: f64,
     rss: u64,
     procs: usize,
+    /// Highest nice value in the tree below the shell: "+5" means the throttle is on it.
+    nice: i32,
+    focused: bool,
     agent: String,
     title: String,
     space: String,
@@ -558,11 +836,17 @@ fn report(once: bool) -> ExitCode {
                 herdr.shell_pid(&id).ok().flatten().filter(|&pid| is_local_shell(pid))
             });
             let Some(usage) = pid.and_then(|pid| snap.tree_usage(pid)) else { continue };
+            // Nice of the shell's direct children = the agent process itself (MCP servers
+            // further down may carry their own values from tools like ananicy).
+            let shell = pid.unwrap_or(0);
+            let nice = snap.procs.iter().filter(|(_, p)| p.ppid == shell).map(|(_, p)| p.nice).max().unwrap_or(0);
             rows.push(Row {
                 level: cfg.level(usage.cpu_pct, usage.rss_bytes),
                 cpu: usage.cpu_pct,
                 rss: usage.rss_bytes,
                 procs: usage.procs,
+                nice,
+                focused: p.get("focused").and_then(Value::as_bool).unwrap_or(false),
                 agent: s("agent"),
                 title: s("terminal_title_stripped"),
                 space: spaces.get(&s("workspace_id")).cloned().unwrap_or_default(),
@@ -616,20 +900,27 @@ fn render(rows: &[Row], total_procs: usize, cfg: &Config, once: bool) -> String 
         mem_text(total_rss)
     ));
     out.push_str(&format!(
-        "{DIM}   {:>6} {:>7} {:>5}  {:<7} {:<16} {:<40} {}{RESET}\n",
-        "CPU", "RAM", "PROCS", "AGENT", "SPACE", "PANE", "BUSIEST"
+        "{DIM}   {:>6} {:>7} {:>5} {:>4}  {:<7} {:<16} {:<40} {}{RESET}\n",
+        "CPU", "RAM", "PROCS", "NICE", "AGENT", "SPACE", "PANE", "BUSIEST"
     ));
     for r in rows {
         let c = colour(r.level);
         let dot = if r.level == Level::Hidden { "·" } else { "●" };
+        let nice = match r.nice {
+            0 => String::new(),
+            n if n > 0 => format!("+{n}"),
+            n => n.to_string(),
+        };
+        let title = if r.focused { format!("▶ {}", r.title) } else { r.title.clone() };
         out.push_str(&format!(
-            "{c}{dot}{RESET}  {c}{:>5}% {:>7}{RESET} {:>5}  {:<7} {:<16} {:<40} {DIM}{}{RESET}\n",
+            "{c}{dot}{RESET}  {c}{:>5}% {:>7}{RESET} {:>5} {:>4}  {:<7} {:<16} {:<40} {DIM}{}{RESET}\n",
             cpu_text(r.cpu),
             mem_text(r.rss),
             r.procs,
+            nice,
             cut(if r.agent.is_empty() { "-" } else { &r.agent }, 7),
             cut(&r.space, 16),
-            cut(&r.title, 40),
+            cut(&title, 40),
             cut(&r.top, 18),
         ));
     }
@@ -643,6 +934,12 @@ fn render(rows: &[Row], total_procs: usize, cfg: &Config, once: bool) -> String 
         mem_text((cfg.ram_hot_mb * 1_048_576.0) as u64),
         config::config_path().display()
     ));
+    if cfg.throttle_enabled() {
+        out.push_str(&format!(
+            "{DIM}Throttle: unfocused panes from {:.0} % CPU run at nice +{} (NICE column); ▶ marks the focused pane{RESET}\n",
+            cfg.throttle_cpu, cfg.throttle_nice
+        ));
+    }
     out.push_str(&format!(
         "{DIM}{PLUGIN_ID} {VERSION} · made by the team behind tutoring-agency.com{}{RESET}\n",
         if once { "" } else { " · Enter closes" }
@@ -681,5 +978,18 @@ mod tests {
         assert_eq!(badge_text(3.0, 2867 << 20, false, false), "2.7G");
         assert_eq!(badge_text(99.6, 0, false, true), "99%");
         assert_eq!(badge_text(3.0, 2559 << 20, false, false), "2.4G");
+    }
+
+    #[test]
+    fn throttle_only_busy_unfocused_panes_and_releases_on_focus() {
+        use Throttle::*;
+        // enabled, focused, throttled, cpu, from
+        assert_eq!(throttle_step(true, false, false, 95.0, 90.0), Apply);
+        assert_eq!(throttle_step(true, false, false, 89.9, 90.0), Keep);
+        assert_eq!(throttle_step(true, true, false, 500.0, 90.0), Keep); // focused: never throttled
+        assert_eq!(throttle_step(true, true, true, 500.0, 90.0), Release); // focus restores at once
+        assert_eq!(throttle_step(true, false, true, 5.0, 90.0), Keep); // idle but unfocused: nice costs nothing
+        assert_eq!(throttle_step(false, false, true, 500.0, 90.0), Release); // throttle switched off
+        assert_eq!(throttle_step(false, false, false, 500.0, 90.0), Keep);
     }
 }

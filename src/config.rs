@@ -1,9 +1,13 @@
 // Thresholds and interval, read from the plugin's config.toml.
-// Created 2026-10-22 (David Lepold + Claude Opus 5.5). Last update: 2026-10-22.
+// Created 2026-10-22 (David Lepold + Claude Opus 5.5). Last update: 2026-10-23 (throttle keys).
 //
 // Only flat `key = number` lines are understood, which keeps the binary free of a
 // TOML dependency. Unknown keys and malformed lines are ignored, so a typo never
 // stops the badges; the report pane shows the values actually in effect.
+//
+// Throttle (off by default): `throttle_nice = 5` sets the nice value a busy pane's
+// process tree gets while the pane has no focus; `throttle_cpu = 90` is the CPU
+// percentage (of one core, like the badge) from which that happens.
 
 use std::env;
 use std::fs;
@@ -45,6 +49,11 @@ pub struct Config {
     /// false: badge shows only the metric that sets the colour ("22%" or "2.8G"),
     /// which fits herdr's narrow sidebar; true: both ("22% 2.8G").
     pub badge_both: bool,
+    /// 0 = throttle off. Otherwise the nice value (1..19) a busy, unfocused pane's
+    /// process tree is set to; 5 is "Low" in GNOME's System Monitor.
+    pub throttle_nice: i32,
+    /// CPU percentage of one core (the badge's metric) from which a pane is throttled.
+    pub throttle_cpu: f64,
 }
 
 impl Default for Config {
@@ -58,11 +67,17 @@ impl Default for Config {
             ram_warn_mb: 2560.0,
             ram_hot_mb: 4096.0,
             badge_both: false,
+            throttle_nice: 0,
+            throttle_cpu: 90.0,
         }
     }
 }
 
 impl Config {
+    pub fn throttle_enabled(&self) -> bool {
+        self.throttle_nice > 0
+    }
+
     /// The worse of the CPU level and the RAM level decides the colour.
     pub fn level(&self, cpu_pct: f64, rss_bytes: u64) -> Level {
         let (cpu, ram) = self.levels(cpu_pct, rss_bytes);
@@ -147,6 +162,8 @@ pub fn load() -> Config {
             "ram_show_mb" => cfg.ram_show_mb = v,
             "ram_warn_mb" => cfg.ram_warn_mb = v,
             "ram_hot_mb" => cfg.ram_hot_mb = v,
+            "throttle_nice" => cfg.throttle_nice = (v as i32).clamp(0, 19),
+            "throttle_cpu" => cfg.throttle_cpu = v.max(1.0),
             _ => {}
         }
     }

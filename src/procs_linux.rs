@@ -41,6 +41,7 @@ fn read_into(pid: u32, buf: &mut String) -> Option<Proc> {
         cpu_ns: s.ticks.saturating_mul(1_000_000_000) / tck,
         start: s.start,
         rss_bytes: s.rss_pages * page,
+        nice: s.nice,
         name: s.name,
     })
 }
@@ -65,6 +66,7 @@ struct Stat {
     ticks: u64,
     start: u64,
     rss_pages: u64,
+    nice: i32,
     name: String,
 }
 
@@ -74,7 +76,7 @@ fn parse_stat(s: &str) -> Option<Stat> {
     let open = s.find('(')?;
     let close = s.rfind(')')?;
     let name = s.get(open + 1..close)?.to_string();
-    // Fields after ')': 0 state, 1 ppid, 11 utime, 12 stime, 19 starttime, 21 rss (pages).
+    // Fields after ')': 0 state, 1 ppid, 11 utime, 12 stime, 16 nice, 19 starttime, 21 rss (pages).
     let mut f = [""; 22];
     let mut n = 0;
     for (i, v) in s.get(close + 1..)?.split_ascii_whitespace().take(22).enumerate() {
@@ -89,6 +91,7 @@ fn parse_stat(s: &str) -> Option<Stat> {
         ticks: f[11].parse::<u64>().ok()? + f[12].parse::<u64>().ok()?,
         start: f[19].parse().ok()?,
         rss_pages: f[21].parse::<i64>().ok()?.max(0) as u64,
+        nice: f[16].parse().ok()?,
         name,
     })
 }
@@ -121,13 +124,14 @@ mod tests {
     #[test]
     fn parses_names_with_spaces_and_parens() {
         let line = "4242 (tmux: server (x)) S 1 4242 4242 0 -1 4194560 100 0 0 0 \
-                    25 7 0 0 20 0 1 0 99887 12345678 2048 18446744073709551615";
+                    25 7 0 0 25 5 1 0 99887 12345678 2048 18446744073709551615";
         let p = parse_stat(line).expect("parse");
         assert_eq!(p.name, "tmux: server (x)");
         assert_eq!(p.ppid, 1);
         assert_eq!(p.ticks, 32);
         assert_eq!(p.start, 99887);
         assert_eq!(p.rss_pages, 2048);
+        assert_eq!(p.nice, 5);
     }
 
     #[test]

@@ -1,5 +1,5 @@
 # herdr plugin: Agent Resource Badges
-# Created 2026-10-22 (David Lepold + Claude Opus 5.5). Last update: 2026-10-22.
+# Created 2026-10-22 (David Lepold + Claude Opus 5.5). Last update: 2026-10-23 (throttle, 0.3.0).
 #
 # Traffic-light CPU/RAM badges for each agent in herdr's sidebar. A badge only
 # appears while an agent is above the "show" thresholds, so a quiet sidebar stays
@@ -7,15 +7,18 @@
 # ($res_ok, $res_warn, $res_hot) that you place and colour in herdr's own
 # config.toml; run the `sidebar-config` action to print the snippet.
 #
+# Optional throttle (config.toml: throttle_nice = 5): a busy agent WITHOUT focus
+# runs at that nice value; the pane you focus goes back to nice 0 at once.
+#
 # Install:    herdr plugin install dlepold/herdr-agent-resource-badges
 # Local dev:  cargo build --release && herdr plugin link .
 # Logs:       herdr plugin log list --plugin agent-resource-badges
 
 id = "agent-resource-badges"
 name = "Agent Resource Badges"
-version = "0.2.0"
+version = "0.3.0"
 min_herdr_version = "0.9.0"
-description = "Green/orange/red CPU and RAM badges per agent in the sidebar, shown only while an agent is busy."
+description = "Green/orange/red CPU and RAM badges per agent in the sidebar, shown only while an agent is busy; optional focus-aware throttle for busy background agents."
 platforms = ["linux", "macos"]
 
 # No Rust needed on x86_64/aarch64 Linux and on macOS (Apple Silicon and Intel): the
@@ -35,6 +38,13 @@ command = ["./target/release/agent-resource-badges", "ensure"]
 [[events]]
 on = "workspace.focused"
 command = ["./target/release/agent-resource-badges", "ensure"]
+
+# Throttle: the pane that just got focus is restored to nice 0 immediately (herdr
+# passes it in HERDR_PANE_ID) instead of on the next sampling round. A no-op while
+# throttle_nice is 0 or the pane was never throttled.
+[[events]]
+on = "pane.focused"
+command = ["./target/release/agent-resource-badges", "unnice"]
 
 [[panes]]
 id = "report"

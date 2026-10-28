@@ -136,6 +136,7 @@ fn to_proc(info: &ProcTaskAllInfo) -> Proc {
         cpu_ns: (mach as u128 * numer as u128 / denom as u128) as u64,
         start: info.pbsd.pbi_start_tvsec.saturating_mul(1_000_000) + info.pbsd.pbi_start_tvusec,
         rss_bytes: info.ptinfo.pti_resident_size,
+        nice: info.pbsd.pbi_nice,
         name: if name.is_empty() { c_name(&info.pbsd.pbi_comm) } else { name },
     }
 }
