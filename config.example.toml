@@ -29,3 +29,8 @@ badge = "short"
 # shells with a raised priority) are brought up to 0 as well.
 throttle_nice = 0      # 0 = off; 1..19 = nice value for busy, unfocused panes
 throttle_cpu  = 90     # % of one core, same metric as the badge
+# Agents launched through a wrapper that another tool keeps at a HIGH nice value inherit
+# it at start (the Codex CLI behind a `node` launcher under Ananicy's node rule: nice 16).
+# Name their process (comm, comma-separated) and the plugin brings such inherited values
+# down to the pane's target once — 0, or throttle_nice while the pane is throttled.
+normalize_names = ""   # e.g. "codex"

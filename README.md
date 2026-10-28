@@ -124,6 +124,7 @@ within one interval.
 | `badge` | `"short"` | `"both"` shows `108% 2.8G` for wide sidebars |
 | `throttle_nice` | 0 (off) | nice value (1–19) for busy panes **without focus**; see below |
 | `throttle_cpu` | 90 | CPU % of one core from which a pane is throttled |
+| `normalize_names` | `""` | comm names (comma-separated) whose inherited high nice value is brought down to the pane's target |
 
 Actions: `open-report`, `sidebar-config`, `status`, `enable`, `disable`.
 
@@ -146,7 +147,11 @@ priority, which every agent launched inside would inherit, and "High" priority
 for a background job is the opposite of what you want. Such processes are
 brought up to nice 0 (no privileges needed), so the three states are simple:
 the focused pane at 0, idle background panes at 0, busy background panes at
-+`throttle_nice`.
++`throttle_nice`. The mirror case exists too: an agent launched through a
+wrapper that another tool keeps at a *high* nice value inherits it at start
+(the Codex CLI behind a `node` launcher under Ananicy's `node` rule arrives at
+nice 16). Name such agents in `normalize_names = "codex"` and the plugin brings
+the inherited value down to the pane's target once.
 
 Raising a nice value needs no privileges, lowering it back does. The sampler
 probes once at start, on a throw-away `sleep` child, whether it can lower nice

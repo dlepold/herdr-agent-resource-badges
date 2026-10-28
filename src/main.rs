@@ -323,6 +323,29 @@ fn normalize_negative(snap: &Snapshot, shell: u32) -> usize {
         .count()
 }
 
+/// Some agents are launched through a wrapper that another tool keeps at a high nice
+/// value (the Codex CLI behind a `node` launcher under Ananicy's node rule: nice 16),
+/// and the agent inherits it at spawn — the nice value and, worse, SCHED_IDLE. For the
+/// configured names, threads above the pane's target (0, or the throttle value while
+/// throttled) or under SCHED_IDLE are brought back to the target on the normal
+/// scheduler. Lowering needs the probed `Lower` method; after that nothing re-raises
+/// them, so this is a one-off per process. Returns how many threads were changed.
+fn normalize_inherited(snap: &Snapshot, shell: u32, names: &[String], target: i32, how: &Lower) -> Result<usize, String> {
+    let mut tids: Vec<u32> = snap
+        .tree_pids(shell)
+        .into_iter()
+        .filter(|&p| p != shell && snap.procs.get(&p).is_some_and(|q| names.iter().any(|n| n == &q.name)))
+        .flat_map(|p| {
+            let mut t = nice::matching_tasks(p, |n| n > target);
+            t.extend(nice::idle_tasks(p));
+            t
+        })
+        .collect();
+    tids.sort_unstable();
+    tids.dedup();
+    nice::lower(&tids, target, how)
+}
+
 /// PIDs below the shell that currently carry the throttle value — the ones to restore.
 fn throttled_pids(snap: &Snapshot, shell: u32, value: i32) -> Vec<u32> {
     snap.tree_pids(shell)
@@ -477,6 +500,15 @@ fn run_daemon() -> ExitCode {
                 if n > 0 && !st.normalize_logged {
                     log(&paths, &format!("normalize {id} [{}]: nice 0 on {n} threads that ran below 0 (further ones silently)", st.label));
                     st.normalize_logged = true;
+                }
+                if !cfg.normalize_names.is_empty() {
+                    let target = if st.throttled { cfg.throttle_nice } else { 0 };
+                    let how = lower.clone().unwrap_or(Lower::Unavailable("not probed".into()));
+                    match normalize_inherited(&snap, pid, &cfg.normalize_names, target, &how) {
+                        Ok(n) if n > 0 => log(&paths, &format!("normalize {id} [{}]: inherited nice brought down to {target} on {n} threads ({})", st.label, cfg.normalize_names.join(","))),
+                        Err(e) => log(&paths, &format!("normalize {id} [{}] inherited nice FAILED: {e}", st.label)),
+                        _ => {}
+                    }
                 }
             }
             match throttle_step(throttle_on, st.focused, st.throttled, cpu, cfg.throttle_cpu) {

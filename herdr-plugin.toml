@@ -1,5 +1,5 @@
 # herdr plugin: Agent Resource Badges
-# Created 2026-10-22 (David Lepold + Claude Opus 5.5). Last update: 2026-10-23 (throttle, 0.3.0).
+# Created 2026-10-22 (David Lepold + Claude Opus 5.5). Last update: 2026-10-27 (normalize_names, SCHED_IDLE restore, 0.3.1).
 #
 # Traffic-light CPU/RAM badges for each agent in herdr's sidebar. A badge only
 # appears while an agent is above the "show" thresholds, so a quiet sidebar stays
@@ -16,7 +16,7 @@
 
 id = "agent-resource-badges"
 name = "Agent Resource Badges"
-version = "0.3.0"
+version = "0.3.1"
 min_herdr_version = "0.9.0"
 description = "Green/orange/red CPU and RAM badges per agent in the sidebar, shown only while an agent is busy; optional focus-aware throttle for busy background agents."
 platforms = ["linux", "macos"]

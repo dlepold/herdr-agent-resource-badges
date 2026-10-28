@@ -136,9 +136,4 @@ impl Snapshot {
         usage.cpu_pct = if self.elapsed > 0.0 { ns as f64 / 1e9 / self.elapsed * 100.0 } else { 0.0 };
         Some(usage)
     }
-
-    /// Nice value of one process in this snapshot.
-    pub fn nice_of(&self, pid: u32) -> Option<i32> {
-        self.procs.get(&pid).map(|p| p.nice)
-    }
 }

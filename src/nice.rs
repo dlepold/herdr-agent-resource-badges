@@ -1,7 +1,7 @@
 // Nice-value control for the throttle: a busy pane without focus gets its process
 // tree set to a higher nice value (less CPU share under contention); when the pane
 // is focused again the tree goes back to nice 0.
-// Created 2026-10-23 (David Lepold + Claude Fable 5.1). Last update: 2026-10-23.
+// Created 2026-10-23 (David Lepold + Claude Fable 5.1). Last update: 2026-10-27 (restore also lifts SCHED_IDLE).
 //
 // Raising nice is allowed for any process of the same user. LOWERING it needs
 // CAP_SYS_NICE, because RLIMIT_NICE is 0 almost everywhere. Three ways, tried in order:
@@ -16,9 +16,82 @@ use std::io;
 use std::process::{Command, ExitCode, Stdio};
 
 const PRIO_PROCESS: i32 = 0;
+#[cfg(target_os = "linux")]
+const SCHED_OTHER: i32 = 0;
+#[cfg(target_os = "linux")]
+const SCHED_IDLE: i32 = 5;
+
+#[repr(C)]
+struct SchedParam {
+    sched_priority: i32,
+}
 
 extern "C" {
     fn setpriority(which: i32, who: u32, prio: i32) -> i32;
+    #[cfg(target_os = "linux")]
+    fn sched_getscheduler(pid: i32) -> i32;
+    #[cfg(target_os = "linux")]
+    fn sched_setscheduler(pid: i32, policy: i32, param: *const SchedParam) -> i32;
+}
+
+/// True when the task runs under SCHED_IDLE (Linux: gets CPU only when nobody else
+/// wants it, whatever its nice value says). Tools like Ananicy give that policy to
+/// whole process families (e.g. every `node`), and children inherit it at spawn.
+pub fn is_idle(tid: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: plain syscall wrapper with a scalar argument.
+        unsafe { sched_getscheduler(tid as i32) == SCHED_IDLE }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = tid;
+        false
+    }
+}
+
+/// Puts a SCHED_IDLE task back on the normal scheduler. Leaving SCHED_IDLE needs
+/// CAP_SYS_NICE, like lowering a nice value; a task that is not idle is left alone.
+pub fn leave_idle(tid: u32) -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        if !is_idle(tid) {
+            return Ok(());
+        }
+        let param = SchedParam { sched_priority: 0 };
+        // SAFETY: `param` outlives the call; the kernel only reads it.
+        if unsafe { sched_setscheduler(tid as i32, SCHED_OTHER, &param) } == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = tid;
+        Ok(())
+    }
+}
+
+/// "Back to normal" for one task: the nice value AND, if it was SCHED_IDLE, the
+/// normal scheduling policy. Used by every restoring path (release, unnice, the
+/// inherited-value normalisation and the root helper).
+pub fn restore(tid: u32, nice: i32) -> io::Result<()> {
+    set(tid, nice)?;
+    leave_idle(tid)
+}
+
+/// Tasks of `pid` that run under SCHED_IDLE (Linux), for the inherited-value check.
+pub fn idle_tasks(pid: u32) -> Vec<u32> {
+    #[cfg(target_os = "linux")]
+    let tids: Vec<u32> = std::fs::read_dir(format!("/proc/{pid}/task"))
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse().ok())
+        .collect();
+    #[cfg(not(target_os = "linux"))]
+    let tids = vec![pid];
+    tids.into_iter().filter(|&tid| is_idle(tid)).collect()
 }
 
 /// Sets the nice value of one process. Raising always works for own processes;
@@ -104,7 +177,7 @@ pub fn lower(pids: &[u32], nice: i32, how: &Lower) -> Result<usize, String> {
         return Ok(0);
     }
     match how {
-        Lower::Direct => Ok(pids.iter().filter(|&&pid| set(pid, nice).is_ok()).count()),
+        Lower::Direct => Ok(pids.iter().filter(|&&pid| restore(pid, nice).is_ok()).count()),
         Lower::Sudo => sudo_setnice(pids, nice).map(|_| pids.len()),
         Lower::Unavailable(why) => Err(why.clone()),
     }
@@ -113,7 +186,7 @@ pub fn lower(pids: &[u32], nice: i32, how: &Lower) -> Result<usize, String> {
 /// Tries the direct way first and falls back to sudo for the PIDs that refused.
 /// Used by the `unnice` hook, which runs too briefly for a probe.
 pub fn lower_best_effort(pids: &[u32], nice: i32) -> Result<usize, String> {
-    let refused: Vec<u32> = pids.iter().copied().filter(|&pid| set(pid, nice).is_err()).collect();
+    let refused: Vec<u32> = pids.iter().copied().filter(|&pid| restore(pid, nice).is_err()).collect();
     if refused.is_empty() {
         return Ok(pids.len());
     }
@@ -142,7 +215,8 @@ fn sudo_setnice(pids: &[u32], nice: i32) -> Result<(), String> {
 }
 
 /// The root helper behind `sudo -n <binary> setnice <nice> <pid>…`. It only ever
-/// touches the PIDs it is given and reports every failure on stderr.
+/// touches the PIDs it is given (nice value, and SCHED_IDLE -> normal) and reports
+/// every failure on stderr.
 pub fn setnice_cli(args: &[String]) -> ExitCode {
     let Some(nice) = args.first().and_then(|a| a.parse::<i32>().ok()) else {
         eprintln!("usage: setnice <nice -20..19> <pid>…");
@@ -152,7 +226,7 @@ pub fn setnice_cli(args: &[String]) -> ExitCode {
     for a in &args[1..] {
         match a.parse::<u32>() {
             Ok(pid) => {
-                if let Err(e) = set(pid, nice) {
+                if let Err(e) = restore(pid, nice) {
                     eprintln!("pid {pid}: {e}");
                     failed += 1;
                 }

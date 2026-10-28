@@ -54,6 +54,11 @@ pub struct Config {
     pub throttle_nice: i32,
     /// CPU percentage of one core (the badge's metric) from which a pane is throttled.
     pub throttle_cpu: f64,
+    /// Process names (comm) whose INHERITED positive nice value is brought down to the
+    /// pane's target (0, or throttle_nice while throttled). For agents launched through a
+    /// wrapper that some other tool keeps at a high nice value, e.g. the Codex CLI behind a
+    /// `node` launcher under Ananicy's node rule. Empty = off.
+    pub normalize_names: Vec<String>,
 }
 
 impl Default for Config {
@@ -69,6 +74,7 @@ impl Default for Config {
             badge_both: false,
             throttle_nice: 0,
             throttle_cpu: 90.0,
+            normalize_names: Vec::new(),
         }
     }
 }
@@ -148,6 +154,14 @@ pub fn load() -> Config {
         let Some((key, value)) = line.split_once('=') else { continue };
         if key.trim() == "badge" {
             cfg.badge_both = value.trim().trim_matches('"') == "both";
+            continue;
+        }
+        if key.trim() == "normalize_names" {
+            cfg.normalize_names = value
+                .split(',')
+                .map(|n| n.trim().trim_matches(|c| c == '"' || c == '[' || c == ']').trim().to_string())
+                .filter(|n| !n.is_empty())
+                .collect();
             continue;
         }
         let Ok(v) = value.trim().parse::<f64>() else { continue };
